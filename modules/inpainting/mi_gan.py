@@ -3,6 +3,7 @@ import onnxruntime as ort
 import imkit as imk
 from PIL import Image
 import numpy as np
+import logging
 
 from ..utils.inpainting import (
     load_jit_model,
@@ -11,9 +12,15 @@ from ..utils.inpainting import (
     norm_img,
 )
 from modules.utils.download import ModelDownloader, ModelID
-from modules.utils.device import get_providers
+from modules.utils.device import (
+    get_providers,
+    create_onnx_session_with_fallback,
+    should_use_gpu_for_inpainting,
+)
 from .base import InpaintModel
 from .schema import Config
+
+logger = logging.getLogger(__name__)
 
 
 class MIGAN(InpaintModel):
@@ -30,8 +37,9 @@ class MIGAN(InpaintModel):
             model_id = ModelID.MIGAN_PIPELINE_ONNX if self.use_pipeline_for_onnx else ModelID.MIGAN_ONNX
             ModelDownloader.get(model_id)
             onnx_path = ModelDownloader.primary_path(model_id)
-            providers = get_providers(device)
-            self.session = ort.InferenceSession(onnx_path, providers=providers)
+            self.session_gpu = create_onnx_session_with_fallback(onnx_path, device, logger)
+            self.session_cpu = ort.InferenceSession(onnx_path, providers=['CPUExecutionProvider'])
+            self.device_gpu = device
         else:
             ModelDownloader.get(ModelID.MIGAN_JIT)
             local_path = ModelDownloader.primary_path(ModelID.MIGAN_JIT)
@@ -94,48 +102,83 @@ class MIGAN(InpaintModel):
         if backend == 'onnx' and getattr(self, 'use_pipeline', False):
             # Pipeline model expects uint8 RGB image and uint8 grayscale mask
             # Convert mask to binary (255 for known, 0 for masked)
-            binary_mask = np.where(mask > 120, 0, 255).astype(np.uint8)  # Invert: 0=masked, 255=known
+            binary_mask = np.where(mask > 120, 0, 255).astype(np.uint8)
             
-            # Inspect expected input shapes (may contain symbolic dims)
-            inps = self.session.get_inputs()
-            img_nchw = np.transpose(image, (2, 0, 1))[np.newaxis, ...]  # (1, 3, H, W) uint8
-            # Ensure mask is 2D before adding batch/channel (pad utility may have added a trailing channel)
+            # Pre-check memory before inference
+            use_gpu = should_use_gpu_for_inpainting(
+                image.shape[0], image.shape[1], image.shape[2] if len(image.shape) > 2 else 1,
+                safety_margin_gb=0.5, logger=logger
+            )
+            session = self.session_gpu if use_gpu else self.session_cpu
+            
+            inps = session.get_inputs()
+            img_nchw = np.transpose(image, (2, 0, 1))[np.newaxis, ...]
             if binary_mask.ndim == 3 and binary_mask.shape[2] == 1:
                 binary_mask_2d = binary_mask[:, :, 0]
             else:
                 binary_mask_2d = binary_mask
-            mask_nchw = binary_mask_2d[np.newaxis, np.newaxis, ...]  # (1, 1, H, W)
+            mask_nchw = binary_mask_2d[np.newaxis, np.newaxis, ...]
 
             ort_inputs = {
                 inps[0].name: img_nchw,
                 inps[1].name: mask_nchw
             }
-            # Optional quick shape debug (can be silenced later)
             if os.environ.get('MIGAN_DEBUG_SHAPES') == '1':
                 print(f"[MIGAN ONNX] Feeding image shape {img_nchw.shape} mask shape {mask_nchw.shape} orig mask shape {mask.shape}")
-            out = self.session.run(None, ort_inputs)[0]  # Should be (1, 3, H, W) uint8 RGB
-            out_img = np.transpose(out[0], (1, 2, 0))  # Convert to (H, W, 3)
-            cur_res = out_img  # Keep in RGB format
+            
+            try:
+                out = session.run(None, ort_inputs)[0]
+            except RuntimeError as e:
+                # Fallback to CPU if GPU inference fails
+                error_msg = str(e).lower()
+                if 'failed to allocate' in error_msg or 'out of memory' in error_msg:
+                    logger.warning(f"GPU inference memory failed: {e}")
+                    logger.info("Retrying with CPU/DRAM...")
+                    out = self.session_cpu.run(None, ort_inputs)[0]
+                else:
+                    raise
+            
+            out_img = np.transpose(out[0], (1, 2, 0))
+            cur_res = out_img
             return cur_res
         elif backend == 'onnx':
-            # Original exported model path (preprocessing required)
-            img_norm = norm_img(image)  # C,H,W float32 [0,1]
+            # Original exported model path
+            img_norm = norm_img(image)
             img_norm = img_norm * 2 - 1
             m = (mask > 120).astype(np.uint8) * 255
             m_norm = norm_img(m)
-            img_np = img_norm[np.newaxis, ...]  # (1,C,H,W)
+            img_np = img_norm[np.newaxis, ...]
             mask_np = m_norm[np.newaxis, ...]
             erased = img_np * (1 - mask_np)
-            concat = np.concatenate([0.5 - mask_np, erased], axis=1)  # (1,4,H,W)
-            ort_inputs = {self.session.get_inputs()[0].name: concat}
-            out = self.session.run(None, ort_inputs)[0]  # (1,3,H,W) in [-1,1]
+            concat = np.concatenate([0.5 - mask_np, erased], axis=1)
+            ort_inputs = {self.session_gpu.get_inputs()[0].name: concat}
+            
+            # Pre-check memory before inference
+            use_gpu = should_use_gpu_for_inpainting(
+                image.shape[0], image.shape[1], image.shape[2] if len(image.shape) > 2 else 1,
+                safety_margin_gb=0.5, logger=logger
+            )
+            session = self.session_gpu if use_gpu else self.session_cpu
+            
+            try:
+                out = session.run(None, ort_inputs)[0]
+            except RuntimeError as e:
+                # Fallback to CPU if GPU inference fails
+                error_msg = str(e).lower()
+                if 'failed to allocate' in error_msg or 'out of memory' in error_msg:
+                    logger.warning(f"GPU inference memory failed: {e}")
+                    logger.info("Retrying with CPU/DRAM...")
+                    out = self.session_cpu.run(None, ort_inputs)[0]
+                else:
+                    raise
+            
             out_img = np.clip((out.transpose(0, 2, 3, 1) * 127.5 + 127.5).round(), 0, 255).astype(np.uint8)[0]
-            cur_res = out_img  # Keep in RGB format
+            cur_res = out_img
             return cur_res
         else:
             # Torch path
             import torch  # noqa
-            img_norm = norm_img(image)  # C,H,W float32 [0,1]
+            img_norm = norm_img(image)
             img_norm = img_norm * 2 - 1
             m = (mask > 120).astype(np.uint8) * 255
             m_norm = norm_img(m)
@@ -151,5 +194,5 @@ class MIGAN(InpaintModel):
                 .to(torch.uint8)
             )
             output = output[0].cpu().numpy()
-            cur_res = output  # Keep in RGB format
+            cur_res = output
             return cur_res
