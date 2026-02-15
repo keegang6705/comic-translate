@@ -7,7 +7,7 @@ __pycache__/
 **/settings.json
 /app/icons
 
-# Model Folder
+# Models Folder
 models/
 
 # Environments
