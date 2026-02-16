@@ -528,6 +528,17 @@ class ComicTranslate(ComicTranslateUI):
 
     def start_batch_process(self):
         for image_path in self.image_files:
+            # Ensure image_states entry exists for this path
+            if image_path not in self.image_states:
+                self.image_states[image_path] = {
+                    'viewer_state': {},
+                    'source_lang': self.s_combo.currentText(),
+                    'target_lang': self.t_combo.currentText(),
+                    'brush_strokes': [],
+                    'blk_list': [],
+                    'skip': False,
+                }
+            
             target_lang = self.image_states[image_path]['target_lang']
             if not validate_settings(self, target_lang):
                 return
@@ -556,6 +567,17 @@ class ComicTranslate(ComicTranslateUI):
 
         # validate each
         for path in selected_paths:
+            # Ensure image_states entry exists for this path
+            if path not in self.image_states:
+                self.image_states[path] = {
+                    'viewer_state': {},
+                    'source_lang': self.s_combo.currentText(),
+                    'target_lang': self.t_combo.currentText(),
+                    'brush_strokes': [],
+                    'blk_list': [],
+                    'skip': False,
+                }
+            
             tgt = self.image_states[path]['target_lang']
             if not validate_settings(self, tgt):
                 return

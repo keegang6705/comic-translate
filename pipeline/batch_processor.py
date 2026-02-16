@@ -92,6 +92,41 @@ class BatchProcessor:
         worker = getattr(self.main_page, "current_worker", None)
         return bool(worker and worker.is_cancelled)
 
+    def _filter_small_blocks(self, blk_list: List, min_width: int = 20, min_height: int = 20) -> List:
+        """
+        Filter out text blocks that are too small for reliable OCR processing.
+        Very small blocks can cause TensorRT convolution/deconvolution errors.
+        
+        Args:
+            blk_list: List of TextBlock objects
+            min_width: Minimum block width in pixels (default 20)
+            min_height: Minimum block height in pixels (default 20)
+            
+        Returns:
+            Filtered list of TextBlock objects
+        """
+        filtered_blocks = []
+        small_blocks_count = 0
+        
+        for blk in blk_list:
+            if hasattr(blk, 'xyxy') and len(blk.xyxy) >= 4:
+                x1, y1, x2, y2 = blk.xyxy[0], blk.xyxy[1], blk.xyxy[2], blk.xyxy[3]
+                width = abs(x2 - x1)
+                height = abs(y2 - y1)
+                
+                if width >= min_width and height >= min_height:
+                    filtered_blocks.append(blk)
+                else:
+                    small_blocks_count += 1
+                    logger.debug(f"Filtering out small block: {width}x{height}px (below {min_width}x{min_height}px minimum)")
+            else:
+                filtered_blocks.append(blk)
+        
+        if small_blocks_count > 0:
+            logger.info(f"Filtered out {small_blocks_count} blocks smaller than {min_width}x{min_height}px")
+        
+        return filtered_blocks
+
     def batch_process(self, selected_paths: List[str] = None):
         timestamp = datetime.now().strftime("%b-%d-%Y_%I-%M-%S%p")
         image_list = selected_paths if selected_paths is not None else self.main_page.image_files
@@ -105,6 +140,17 @@ class BatchProcessor:
 
             # index, step, total_steps, change_name
             self.emit_progress(index, total_images, 0, 10, True)
+
+            # Ensure image_states entry exists for this path
+            if image_path not in self.main_page.image_states:
+                self.main_page.image_states[image_path] = {
+                    'viewer_state': {},
+                    'source_lang': self.main_page.s_combo.currentText(),
+                    'target_lang': self.main_page.t_combo.currentText(),
+                    'brush_strokes': [],
+                    'blk_list': [],
+                    'skip': False,
+                }
 
             settings_page = self.main_page.settings_page
             source_lang = self.main_page.image_states[image_path]['source_lang']
@@ -152,6 +198,16 @@ class BatchProcessor:
                 return
 
             if blk_list:
+                # Filter out small blocks that can cause OCR errors
+                blk_list = self._filter_small_blocks(blk_list)
+                
+                if not blk_list:
+                    # All blocks were filtered out, skip this image
+                    self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
+                    self.main_page.image_skipped.emit(image_path, "Text Blocks", "All text blocks were too small for OCR")
+                    self.log_skipped_image(directory, timestamp, image_path, "All text blocks were too small for OCR")
+                    continue
+                
                 # Get ocr cache key for batch processing
                 ocr_model = settings_page.get_tool_selection('ocr')
                 device = resolve_device(settings_page.is_gpu_enabled())
