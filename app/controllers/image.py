@@ -695,8 +695,8 @@ class ImageStateController:
             self.main.loaded_images.append(file_path)
             if len(self.main.loaded_images) > self.main.max_images_in_memory:
                 oldest_image = self.main.loaded_images.pop(0)
-                del self.main.image_data[oldest_image]
-                self.main.in_memory_history[oldest_image] = []
+                self.main.image_data.pop(oldest_image, None)
+                self.main.in_memory_history.pop(oldest_image, None)
 
                 self.main.in_memory_patches.pop(oldest_image, None)
 
