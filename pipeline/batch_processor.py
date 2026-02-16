@@ -198,6 +198,16 @@ class BatchProcessor:
                 return
 
             if blk_list:
+                # Filter out small blocks that can cause OCR errors
+                blk_list = self._filter_small_blocks(blk_list)
+                
+                if not blk_list:
+                    # All blocks were filtered out, skip this image
+                    self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
+                    self.main_page.image_skipped.emit(image_path, "Text Blocks", "All text blocks were too small for OCR")
+                    self.log_skipped_image(directory, timestamp, image_path, "All text blocks were too small for OCR")
+                    continue
+                
                 # Get ocr cache key for batch processing
                 ocr_model = settings_page.get_tool_selection('ocr')
                 device = resolve_device(settings_page.is_gpu_enabled())
