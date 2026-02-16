@@ -271,6 +271,17 @@ class WebtoonBatchProcessor:
 
         # OCR processing (only if blocks exist)
         if blk_list:
+            # Ensure image_states entry exists for this path
+            if vpage1.physical_page_path not in self.main_page.image_states:
+                self.main_page.image_states[vpage1.physical_page_path] = {
+                    'viewer_state': {},
+                    'source_lang': self.main_page.s_combo.currentText(),
+                    'target_lang': self.main_page.t_combo.currentText(),
+                    'brush_strokes': [],
+                    'blk_list': [],
+                    'skip': False,
+                }
+            
             source_lang = self.main_page.image_states[vpage1.physical_page_path]['source_lang']
             self.ocr_handler.ocr.initialize(self.main_page, source_lang)
             try:
@@ -669,6 +680,17 @@ class WebtoonBatchProcessor:
         # Final deduplication at the physical page level
         final_blocks = self._deduplicate_physical_blocks(all_physical_blocks)
         
+        # Ensure image_states entry exists for this path
+        if image_path not in self.main_page.image_states:
+            self.main_page.image_states[image_path] = {
+                'viewer_state': {},
+                'source_lang': self.main_page.s_combo.currentText(),
+                'target_lang': self.main_page.t_combo.currentText(),
+                'brush_strokes': [],
+                'blk_list': [],
+                'skip': False,
+            }
+
         if not final_blocks:
             logger.warning(f"No final blocks found for physical page {physical_page_index}. Marking for skip.")
             self.main_page.image_states[image_path]['blk_list'] = []
@@ -707,6 +729,18 @@ class WebtoonBatchProcessor:
         """
         # Get the state for the parent physical page, creating it if it doesn't exist.
         image_path = vpage.physical_page_path
+        
+        # Ensure image_states entry exists for this path
+        if image_path not in self.main_page.image_states:
+            self.main_page.image_states[image_path] = {
+                'viewer_state': {},
+                'source_lang': self.main_page.s_combo.currentText(),
+                'target_lang': self.main_page.t_combo.currentText(),
+                'brush_strokes': [],
+                'blk_list': [],
+                'skip': False,
+            }
+        
         page_state = self.main_page.image_states[image_path]
         viewer_state = page_state.setdefault('viewer_state', {})
         text_items_state = viewer_state.setdefault('text_items_state', [])
@@ -932,7 +966,7 @@ class WebtoonBatchProcessor:
                 break
         
         # Check if the page should be skipped due to no text blocks
-        if self.main_page.image_states[image_path].get('skip_render'):
+        if self.main_page.image_states.get(image_path, {}).get('skip_render'):
             logger.info(f"Skipping final render for page {page_idx}, copying original.")
             reason = "No text blocks detected or processed successfully."
             self.skip_save(directory, timestamp, base_name, extension, archive_bname, image)
